@@ -47,9 +47,7 @@ void Strategy2StochVol::OnQuote(const QuoteEventMsg& msg) {
     double bid = msg.best_bid_price();
     double ask = msg.best_ask_price();
     
-    if (bid <= 0.0 |
-
-| ask <= 0.0) return;
+    if (bid <= 0.0 || ask <= 0.0) return;
     double mid = 0.5 * (bid + ask);
     uint64_t now_ns = msg.source_time().time_since_epoch().count();
 
