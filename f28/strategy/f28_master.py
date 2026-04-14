@@ -13,16 +13,27 @@ Orchestration responsibilities:
 Tick contract (tick_data dict keys):
 
     timestamp       : datetime or pandas.Timestamp
-    spot_price      : float                       -- true spot (index / cash)
-    f1_price        : float
+    f1_price        : float                       -- used as spot proxy (CL convention)
     f1_vol          : int                         -- executed trade size on this tick
     f1_symbol       : str                         -- e.g. 'CLM25'
-    f1_expiry       : datetime                    -- physical expiry
+    f1_expiry       : datetime                    -- physical expiry of F1
+    f2_expiry       : datetime                    -- physical expiry of F2
     curve_prices    : np.ndarray, shape (n,)      -- [F1, F2, F3, ...]
     curve_spreads   : np.ndarray, shape (n,)      -- bid-ask per tenor
     curve_symbols   : tuple[str,  ...]            -- symbol per slot
     l3_features     : np.ndarray                  -- [Spread, Imbalance, Intensity]
-    risk_free_rate  : float                       -- DGS10, continuously compounded
+    risk_free_rate  : float                       -- short rate (SOFR 3M / 3M T-Bill)
+
+Spot-price convention for CL:
+    There is no continuously-traded WTI cash tape, so we treat F1 as the
+    spot reference and use F2 as the EKF observation. The Gibson-Schwartz
+    relationship is rearranged:
+
+        F2 / F1 = exp((r - y) * (tau_2 - tau_1))
+
+    which is mathematically identical to the standard form with S = F1
+    and tau = tau_2 - tau_1. This lets the EKF back out the convenience
+    yield from the inter-contract basis directly.
 """
 from __future__ import annotations
 
@@ -95,16 +106,21 @@ class F28Strategy:
         print(f"[{ts}] F-28: Frank triggered death signal on {tick_data['f1_symbol']}.")
 
         # 2. Phase 2.5 -- EKF physics overlay
-        tau = self._compute_tau(tick_data)
-        if tau <= 0:
-            # Past expiry. Skip EKF, force F2 roll.
+        # CL convention: S = F1 (spot proxy), F_market = F2, tau = tau_2 - tau_1.
+        tau_f1 = self._years_until(tick_data["f1_expiry"], ts)
+        tau_f2 = self._years_until(tick_data["f2_expiry"], ts)
+        inter_tau = tau_f2 - tau_f1
+
+        if tau_f1 <= 0 or inter_tau <= 0:
+            # F1 past expiry or curve has collapsed -- EKF is undefined.
+            # Force the safe sequential F2 roll.
             is_supply_shock = True
         else:
             dt = self._compute_dt(ts)
             is_supply_shock = self.ekf.step(
-                S_t=tick_data["spot_price"],
-                F_market=tick_data["f1_price"],
-                tau=tau,
+                S_t=float(tick_data["curve_prices"][0]),     # F1 as spot
+                F_market=float(tick_data["curve_prices"][1]),  # F2 observation
+                tau=inter_tau,
                 r=tick_data["risk_free_rate"],
                 dt=dt,
             )
@@ -176,14 +192,13 @@ class F28Strategy:
             )
 
     # ------------------------------------------------------------------
-    def _compute_tau(self, tick_data: dict) -> float:
-        """Time-to-maturity in years, continuously compounded convention."""
-        expiry = tick_data["f1_expiry"]
-        now = tick_data["timestamp"]
-        delta = expiry - now
-        seconds = delta.total_seconds()
-        # 252 * 6.5 * 3600 active seconds per year is one convention; for
-        # continuously traded commodity futures calendar years are cleaner.
+    @staticmethod
+    def _years_until(expiry, now) -> float:
+        """Calendar-time years to a given expiry. Calendar (not trading)
+        years because CL trades nearly continuously (Sunday 6pm - Friday
+        5pm ET) and its carry model is driven by physical storage, which
+        accrues on calendar time."""
+        seconds = (expiry - now).total_seconds()
         return seconds / (365.25 * 24.0 * 3600.0)
 
     def _compute_dt(self, ts) -> float:

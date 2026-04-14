@@ -1,16 +1,19 @@
 """
-Filler entry-point: wires every injected dependency correctly and boots
-the backtester. This is the Python equivalent of the OnQuote master
-class's construction block in the C++ deployment -- it owns the object
-graph and nothing else.
+F28 entry point for CL (WTI Crude Oil) futures.
 
-To run live:
-    1. Ensure ops/train_f28_models.py has produced
-       ./models/f28_parameters.json.
-    2. `python -m f28.main`
+Wires every injected dependency and boots the backtester. Python mirror
+of the OnQuote master class's construction block in the C++ Strategy
+Studio deployment -- owns the object graph, nothing else.
 
-Placeholders (calibration constants, OU parameters) are flagged. Replace
-with real offline-fit values before any live deployment.
+Underlying: CL (NYMEX WTI Crude Oil). Rate source is short-term
+(SOFR 3M / 3M T-Bill), NOT DGS10, because the front-back basis has
+tau ~ 1 month.
+
+To run:
+    1. ops/train_f28_models.py -> ./models/f28_parameters.json
+    2. python -m f28.main
+
+Placeholders (OU calibration) are flagged inline.
 """
 from __future__ import annotations
 
@@ -47,6 +50,8 @@ def _load_trained_params(path: str) -> dict | None:
 
 def build_strategy(params: dict | None) -> F28Strategy:
     # -------- Phase 1: Frank --------
+    # CL tuning: bucket_volume ~1000 matches typical CL tick volume per
+    # bucket; ES would need 10-50x larger buckets.
     frank = FrankSignalEngine(
         vpin_threshold=0.75,
         entropy_limit=2.0,
@@ -68,9 +73,18 @@ def build_strategy(params: dict | None) -> F28Strategy:
         burn_in=30,
     )
 
-    # -------- Phase 2.5: EKF --------
-    # NOTE: kappa, theta, sigma_y are offline-calibrated per commodity.
-    # The numbers below are placeholders appropriate for crude oil.
+    # -------- Phase 2.5: EKF (CL / WTI calibration) --------
+    # kappa, theta, sigma_y should be offline-fit against a historical
+    # convenience-yield series derived from the F2/F1 basis. The defaults
+    # below are reasonable starting values for WTI; replace with MLE fits
+    # before live deployment.
+    #   theta = 0.03  --  3% annualized long-run convenience yield
+    #   sigma_y = 0.25 --  CL convenience yield is genuinely volatile
+    #   kappa = 1.5   --  moderate mean reversion
+    #   physical_limit = 0.15 -- 15% y ==> real supply shock (Cushing,
+    #                            OPEC, geopolitical). Drives the Phase 2
+    #                            PCA override.
+    #   obs_noise = 0.10 -- F2 microstructure noise in $ terms
     ekf = ConvenienceYieldEKF(
         kappa=1.5,
         theta=0.03,
@@ -86,10 +100,15 @@ def build_strategy(params: dict | None) -> F28Strategy:
     execution = ExecutionEngine(hmm_model=hmm, total_time_steps=20)
 
     # -------- Phase 4: Totem --------
+    # price_floor is CL-specific. The April 2020 WTI event proved prices
+    # can go negative; $5 is well above any plausible normal-regime price
+    # and well below any plausible panic low, so it catches the regime
+    # break without triggering on ordinary selloffs.
     totem = TotemCircuitBreaker(
         window_size=100,
         jump_threshold=2.5,
         hurst_limit=0.15,
+        price_floor=5.0,
     )
 
     return F28Strategy(

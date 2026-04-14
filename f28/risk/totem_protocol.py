@@ -42,11 +42,22 @@ class TotemCircuitBreaker:
         jump_threshold: float = 2.5,
         hurst_limit: float = 0.15,
         min_samples: int = 30,
+        price_floor: Optional[float] = None,
     ):
+        """
+        price_floor: Absolute price below which the breaker trips
+            immediately. For CL this should be set (e.g. $5) because the
+            April 2020 negative-price event proved that the continuous
+            diffusion assumption can collapse catastrophically AND the
+            log-return machinery itself becomes undefined. If None, no
+            floor check runs (appropriate for ES and other financial
+            futures that cannot go negative).
+        """
         self.window_size = int(window_size)
         self.jump_threshold = float(jump_threshold)
         self.hurst_limit = float(hurst_limit)
         self.min_samples = int(min_samples)
+        self.price_floor = price_floor  # keep as Optional[float]
 
         self.price_history: deque[float] = deque(maxlen=self.window_size + 1)
         self.log_returns: deque[float] = deque(maxlen=self.window_size)
@@ -60,8 +71,22 @@ class TotemCircuitBreaker:
         if self.is_halted:
             return True
 
-        if current_price <= 0 or not np.isfinite(current_price):
-            return False
+        # Hard price-floor short-circuit. For CL this catches the
+        # Apr-2020-style negative-price regime before log-return math
+        # ever runs. Also guards against NaN/inf feed corruption.
+        if not np.isfinite(current_price):
+            self._trip(f"non-finite price feed: {current_price}", timestamp)
+            return True
+        if self.price_floor is not None and current_price <= self.price_floor:
+            self._trip(
+                f"price {current_price:.4f} <= floor {self.price_floor:.4f}",
+                timestamp,
+            )
+            return True
+        if current_price <= 0:
+            # Even without an explicit floor, log-return math breaks here.
+            self._trip(f"non-positive price {current_price:.4f}", timestamp)
+            return True
 
         self.price_history.append(float(current_price))
         if len(self.price_history) >= 2:

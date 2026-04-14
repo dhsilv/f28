@@ -53,7 +53,7 @@ class TickEngine:
         if self.strategy is None:
             raise RuntimeError("attach_strategy() must be called before run_csv().")
 
-        df = pd.read_csv(path, parse_dates=["timestamp", "f1_expiry"])
+        df = pd.read_csv(path, parse_dates=["timestamp", "f1_expiry", "f2_expiry"])
         for row in df.itertuples(index=False):
             tick = self._row_to_tick(row._asdict())
             self.strategy.on_tick(tick)
@@ -81,11 +81,11 @@ class TickEngine:
 
         return {
             "timestamp": row["timestamp"],
-            "spot_price": float(row["spot_price"]),
             "f1_price": float(row["f1_price"]),
             "f1_vol": int(row["f1_vol"]),
             "f1_symbol": str(row["f1_symbol"]),
             "f1_expiry": row["f1_expiry"],
+            "f2_expiry": row["f2_expiry"],
             "curve_prices": _arr("curve_prices", float),
             "curve_spreads": _arr("curve_spreads", float),
             "curve_symbols": _tup("curve_symbols"),
