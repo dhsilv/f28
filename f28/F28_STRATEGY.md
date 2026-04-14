@@ -223,7 +223,7 @@ Using the exact form (rather than $Q = \sigma_y^2\, dt$) makes the filter robust
 
 ### The physical-shock override
 
-The spec defines the supply-shock condition as $|y_t| > \text{physical\_limit}$. For CL we use 0.15 — 15% annualized convenience yield is well outside the normal operating range (typically 0–5%) and indicates genuine physical scarcity. When this fires, F-28 **skips PCA entirely and forces the safe sequential F2 roll**. The reasoning: PCA residuals in a supply-shocked curve are dominated by the shock itself, not by relative-value mispricing, so any "edge" PCA reports is an artifact.
+The spec defines the supply-shock condition as $|y_t| > y^{\star}$, where $y^{\star}$ is the `physical_limit` hyperparameter. For CL we use $y^{\star} = 0.15$ — 15% annualized convenience yield is well outside the normal operating range (typically 0–5%) and indicates genuine physical scarcity. When this fires, F-28 **skips PCA entirely and forces the safe sequential F2 roll**. The reasoning: PCA residuals in a supply-shocked curve are dominated by the shock itself, not by relative-value mispricing, so any "edge" PCA reports is an artifact.
 
 ### The Gaussian caveat
 
@@ -315,7 +315,7 @@ We model the LOB state as a latent discrete Markov chain over three regimes:
 - **State 1 (Trending)** — directional imbalance, elevated intensity, modest spread widening.
 - **State 2 (Distressed)** — wide spreads, extreme imbalance, high intensity; typical of news events or squeezes.
 
-Observation vector per tick: $(\text{spread},\ \text{book\_imbalance},\ \text{trade\_intensity})$, all computed at the L3 data layer.
+Observation vector per tick: spread, book imbalance, and trade intensity — a 3-dimensional continuous vector computed at the L3 data layer.
 
 **Training.** Baum-Welch EM algorithm on historical L3 features, fit offline via `hmmlearn`. We use full covariance matrices per state — the couplings between spread and imbalance in distressed regimes are load-bearing information; a diagonal covariance would throw them away.
 
