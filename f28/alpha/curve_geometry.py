@@ -37,11 +37,13 @@ class PCAModel:
         ewma_span: int = 60,
         num_components: int = 3,
         liquidity_penalty_bps: float = 2.0,
+        f3_penalty_multiplier: float = 1.5,
         burn_in: int = 30,
     ):
         self.num_tenors = int(num_tenors)
         self.num_components = int(num_components)
         self.liquidity_penalty = float(liquidity_penalty_bps) / 10000.0
+        self.f3_penalty_multiplier = float(f3_penalty_multiplier)
 
         # EWMA decay: pandas-style span -> alpha
         # alpha = 2 / (span + 1); decay (lambda) = 1 - alpha
@@ -165,7 +167,7 @@ class PCAModel:
         # Liquidity adjustment: half-spread cost in return units, plus a
         # constant penalty for crossing the further-out (less liquid) book.
         cost_f2 = 0.5 * spreads[1] / prices[1] + self.liquidity_penalty
-        cost_f3 = 0.5 * spreads[2] / prices[2] + self.liquidity_penalty * 1.5
+        cost_f3 = 0.5 * spreads[2] / prices[2] + self.liquidity_penalty * self.f3_penalty_multiplier
 
         edge_f2 = raw_edge_f2 - cost_f2
         edge_f3 = raw_edge_f3 - cost_f3

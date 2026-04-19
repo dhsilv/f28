@@ -9,20 +9,26 @@ Underlying: CL (NYMEX WTI Crude Oil). Rate source is short-term
 (SOFR 3M / 3M T-Bill), NOT DGS10, because the front-back basis has
 tau ~ 1 month.
 
+All hyperparameters are read from config.json (single source of truth;
+the C++ port reads the same file). Override the path via the F28_CONFIG
+env var if needed.
+
 To run:
     1. ops/train_f28_models.py -> ./models/f28_parameters.json
     2. python -m f28.main
-
-Placeholders (OU calibration) are flagged inline.
 """
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 
+import numpy as np
+
 from alpha.curve_geometry import PCAModel
 from alpha.ekf_overlay import ConvenienceYieldEKF
+from config import load_config
 from engine.backtester import TickEngine
 from execution.almgren_chriss import ExecutionEngine
 from execution.hmm_regime import MicrostructureHMM
@@ -34,82 +40,63 @@ from strategy.f28_master import F28Strategy
 PARAMS_PATH = "./models/f28_parameters.json"
 DATA_PATH = "./data/f1_f2_f3_ticks.csv"
 
+logger = logging.getLogger("f28.main")
+
 
 def _load_trained_params(path: str) -> dict | None:
     """Return offline-trained parameters, or None if unavailable."""
     if not os.path.exists(path):
-        print(
-            f"WARNING: {path} not found. Running with uninitialized Frank "
-            "baseline and an untrained HMM -- strategy will NOT fire. "
-            "Run ops/train_f28_models.py first."
+        logger.warning(
+            "%s not found. Running with uninitialized Frank baseline and "
+            "an untrained HMM -- strategy will NOT fire. Run "
+            "ops/train_f28_models.py first.",
+            path,
         )
         return None
     with open(path, "r") as f:
         return json.load(f)
 
 
-def build_strategy(params: dict | None) -> F28Strategy:
+def build_strategy(params: dict | None, cfg: dict) -> F28Strategy:
     # -------- Phase 1: Frank --------
-    # CL tuning: bucket_volume ~1000 matches typical CL tick volume per
-    # bucket; ES would need 10-50x larger buckets.
-    frank = FrankSignalEngine(
-        vpin_threshold=0.75,
-        entropy_limit=2.0,
-        bucket_volume=1000,
-        window_size=50,
-        live_returns_window=500,
-    )
+    frank = FrankSignalEngine(**cfg["frank"])
     if params is not None and "frank_kde" in params:
-        import numpy as np
         baseline = np.asarray(params["frank_kde"]["returns_sample"], dtype=float)
         frank.load_baseline(baseline)
+    else:
+        logger.warning(
+            "Frank baseline not provided -- KL divergence will return None "
+            "and the death signal cannot fire."
+        )
 
     # -------- Phase 2: PCA (5 tenors, 3 PCs) --------
-    pca = PCAModel(
-        num_tenors=5,
-        ewma_span=60,
-        num_components=3,
-        liquidity_penalty_bps=2.0,
-        burn_in=30,
-    )
+    pca = PCAModel(**cfg["pca"])
 
     # -------- Phase 2.5: EKF (CL / WTI calibration) --------
     # kappa, theta, sigma_y should be offline-fit against a historical
-    # convenience-yield series derived from the F2/F1 basis. The defaults
-    # below are reasonable starting values for WTI; replace with MLE fits
-    # before live deployment.
-    #   theta = 0.03  --  3% annualized long-run convenience yield
-    #   sigma_y = 0.25 --  CL convenience yield is genuinely volatile
-    #   kappa = 1.5   --  moderate mean reversion
-    #   physical_limit = 0.15 -- 15% y ==> real supply shock (Cushing,
-    #                            OPEC, geopolitical). Drives the Phase 2
-    #                            PCA override.
-    #   obs_noise = 0.10 -- F2 microstructure noise in $ terms
-    ekf = ConvenienceYieldEKF(
-        kappa=1.5,
-        theta=0.03,
-        sigma_y=0.25,
-        obs_noise=0.10,
-        physical_limit=0.15,
-    )
+    # convenience-yield series derived from the F2/F1 basis. The config
+    # values are reasonable starting values for WTI; replace with MLE
+    # fits before live deployment.
+    ekf = ConvenienceYieldEKF(**cfg["ekf"])
 
     # -------- Phase 3: HMM + Almgren-Chriss --------
-    hmm = MicrostructureHMM(n_states=3)
+    hmm = MicrostructureHMM(n_states=cfg["hmm"]["n_states"])
     if params is not None and "hmm_matrices" in params:
         hmm.load_from_params(params["hmm_matrices"])
-    execution = ExecutionEngine(hmm_model=hmm, total_time_steps=20)
+    else:
+        logger.warning(
+            "HMM matrices not provided -- regime classification cannot run "
+            "and ExecutionEngine will raise on first predict_online_fast()."
+        )
+    exec_cfg = cfg["execution"]
+    execution = ExecutionEngine(
+        hmm_model=hmm,
+        total_time_steps=exec_cfg["total_time_steps"],
+        kappa_map=exec_cfg["kappa_map"],
+    )
 
     # -------- Phase 4: Totem --------
-    # price_floor is CL-specific. The April 2020 WTI event proved prices
-    # can go negative; $5 is well above any plausible normal-regime price
-    # and well below any plausible panic low, so it catches the regime
-    # break without triggering on ordinary selloffs.
-    totem = TotemCircuitBreaker(
-        window_size=100,
-        jump_threshold=2.5,
-        hurst_limit=0.15,
-        price_floor=5.0,
-    )
+    totem = TotemCircuitBreaker(**cfg["totem"])
 
     return F28Strategy(
         frank_engine=frank,
@@ -118,25 +105,32 @@ def build_strategy(params: dict | None) -> F28Strategy:
         hmm_engine=hmm,
         execution_engine=execution,
         totem_protocol=totem,
-        initial_f1_qty=1000,
+        initial_f1_qty=cfg["strategy"]["initial_f1_qty"],
     )
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+    cfg = load_config()
     params = _load_trained_params(PARAMS_PATH)
-    strategy = build_strategy(params)
+    strategy = build_strategy(params, cfg)
 
     engine = TickEngine(data_path=DATA_PATH)
     engine.attach_strategy(strategy)
 
-    print("Initiating Project F-28...")
+    logger.info("Initiating Project F-28 (commodity=%s)...", cfg.get("commodity"))
     if Path(DATA_PATH).exists():
         engine.run()
     else:
-        print(
-            f"No data file at {DATA_PATH}. The TickEngine is wired; pass a "
-            "stream to engine.run_stream(iterable_of_ticks) from your "
-            "external parser to begin replay."
+        logger.info(
+            "No data file at %s. The TickEngine is wired; pass a stream to "
+            "engine.run_stream(iterable_of_ticks) from your external parser "
+            "to begin replay.",
+            DATA_PATH,
         )
 
 

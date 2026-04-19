@@ -146,11 +146,24 @@ class StrategyStudioETL:
             warnings.simplefilter("ignore")
             model.fit(feature_matrix)
 
+        # Resolve the internal -> logical state map here (authoritative)
+        # so the live strategy and the C++ port both consume an explicit
+        # mapping rather than re-deriving it from covariance traces. The
+        # rule: sort by covariance trace ascending -> Quiet, Trending,
+        # Distressed (for n_states=3).
+        traces = np.array([np.trace(c) for c in model.covars_])
+        sorted_idx = np.argsort(traces)
+        state_map = {
+            str(int(internal_idx)): int(logical_idx)
+            for logical_idx, internal_idx in enumerate(sorted_idx)
+        }
+
         return {
             "transition_matrix": model.transmat_.tolist(),
             "means": model.means_.tolist(),
             "covars": model.covars_.tolist(),
             "start_prob": model.startprob_.tolist(),
+            "state_map": state_map,
             "n_states": int(n_states),
             "n_features": int(feature_matrix.shape[1]),
         }

@@ -1,0 +1,63 @@
+{
+  "_comment": "F28 strategy hyperparameters. Single source of truth. Values here override module defaults; main.py loads this file at boot. The C++ port will parse the same file.",
+
+  "commodity": "CL",
+
+  "frank": {
+    "_comment": "Phase 1 death-signal thresholds. Per spec, these should be tuned on historical rolls; the defaults below are heuristics only.",
+    "vpin_threshold": 0.75,
+    "entropy_limit": 2.0,
+    "bucket_volume": 1000,
+    "window_size": 50,
+    "live_returns_window": 500,
+    "kl_recompute_every": 25,
+    "kde_bw": "silverman"
+  },
+
+  "pca": {
+    "num_tenors": 5,
+    "ewma_span": 60,
+    "num_components": 3,
+    "liquidity_penalty_bps": 2.0,
+    "f3_penalty_multiplier": 1.5,
+    "burn_in": 30
+  },
+
+  "ekf": {
+    "_comment": "OU calibration for CL convenience yield. Replace with MLE fits on a historical basis series before live deployment.",
+    "kappa": 1.5,
+    "theta": 0.03,
+    "sigma_y": 0.25,
+    "obs_noise": 0.10,
+    "physical_limit": 0.15,
+    "initial_uncertainty": 0.01
+  },
+
+  "hmm": {
+    "n_states": 3,
+    "cov_regularization": 1e-10
+  },
+
+  "execution": {
+    "total_time_steps": 20,
+    "_kappa_map_comment": "HMM regime -> Almgren-Chriss urgency. Keys are logical state ids: 0=Quiet, 1=Trending, 2=Distressed. Spec marks these as initial heuristics; calibrate by minimizing realized slippage.",
+    "kappa_map": {
+      "0": 0.1,
+      "1": 1.5,
+      "2": 5.0
+    }
+  },
+
+  "totem": {
+    "_comment": "price_floor is commodity-specific. $5 for CL catches the Apr-2020 negative-price regime. For ES/NQ set to null (cannot go negative).",
+    "window_size": 100,
+    "jump_threshold": 2.5,
+    "hurst_limit": 0.15,
+    "min_samples": 30,
+    "price_floor": 5.0
+  },
+
+  "strategy": {
+    "initial_f1_qty": 1000
+  }
+}

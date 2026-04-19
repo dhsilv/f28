@@ -37,9 +37,15 @@ Spot-price convention for CL:
 """
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 import numpy as np
+
+from constants import SECONDS_PER_YEAR
+from tick_contract import validate_tick
+
+logger = logging.getLogger(__name__)
 
 
 class F28Strategy:
@@ -67,10 +73,33 @@ class F28Strategy:
 
         # Tick-delta bookkeeping for EKF dt
         self._last_tick_ts = None
+        self._tick_validated: bool = False
+        self._last_f1_symbol: Optional[str] = None
 
     # ------------------------------------------------------------------
     def on_tick(self, tick_data: dict) -> None:
+        # Validate once on the first tick (full schema check), then cheap
+        # per-tick invariants on every subsequent tick. A misordered curve
+        # or missing field would otherwise produce silently wrong edges.
+        if not self._tick_validated:
+            validate_tick(tick_data)
+            self._tick_validated = True
+        else:
+            # Cheap invariants only: length of l3 + curve arrays.
+            if len(tick_data["l3_features"]) != 3:
+                raise ValueError("l3_features must be length 3")
+
         ts = tick_data["timestamp"]
+
+        # Reset the EKF covariance on an F1 roll: the tau discontinuity
+        # invalidates the prior uncertainty. We keep the point estimate
+        # (convenience yield is a market state, not a per-contract state).
+        f1_symbol = tick_data["f1_symbol"]
+        if self._last_f1_symbol is not None and f1_symbol != self._last_f1_symbol:
+            logger.info("F1 roll detected: %s -> %s; resetting EKF covariance.",
+                        self._last_f1_symbol, f1_symbol)
+            self.ekf.reset(keep_y=True)
+        self._last_f1_symbol = f1_symbol
 
         # -------- Phase 4: parallel circuit breaker (always first) --------
         # Feed F1 price directly -- log-returns of F1 are what the BPV /
@@ -199,7 +228,7 @@ class F28Strategy:
         5pm ET) and its carry model is driven by physical storage, which
         accrues on calendar time."""
         seconds = (expiry - now).total_seconds()
-        return seconds / (365.25 * 24.0 * 3600.0)
+        return seconds / SECONDS_PER_YEAR
 
     def _compute_dt(self, ts) -> float:
         if self._last_tick_ts is None:
@@ -207,7 +236,7 @@ class F28Strategy:
         secs = (ts - self._last_tick_ts).total_seconds()
         if secs <= 0:
             return self.ekf.default_dt
-        return secs / (365.25 * 24.0 * 3600.0)
+        return secs / SECONDS_PER_YEAR
 
     def _quote_price_for_target(self, tick_data: dict) -> float:
         """Look up the target tenor's current price from curve_prices."""

@@ -31,10 +31,18 @@ Design notes:
 """
 from __future__ import annotations
 
+import logging
 import math
 from typing import Optional
 
 import numpy as np
+
+from constants import SECONDS_PER_YEAR
+
+logger = logging.getLogger(__name__)
+
+# 1-second cadence in calendar-time years. Matches f28_master._compute_dt.
+_DEFAULT_DT_ONE_SECOND = 1.0 / SECONDS_PER_YEAR
 
 
 class ConvenienceYieldEKF:
@@ -45,7 +53,7 @@ class ConvenienceYieldEKF:
         sigma_y: float,
         obs_noise: float,
         physical_limit: float = 0.15,
-        default_dt: float = 1.0 / (252.0 * 6.5 * 3600.0),  # ~1-second tick
+        default_dt: float = _DEFAULT_DT_ONE_SECOND,  # ~1-second tick, calendar-time
         initial_uncertainty: float = 0.01,
     ):
         """
@@ -69,6 +77,23 @@ class ConvenienceYieldEKF:
         self.P: float = float(initial_uncertainty)
 
         self.R: float = self.obs_noise ** 2  # observation noise variance
+
+        # Store prior for reset()
+        self._initial_uncertainty: float = float(initial_uncertainty)
+
+    # ------------------------------------------------------------------
+    def reset(self, keep_y: bool = True) -> None:
+        """Reset filter covariance, optionally keep the point estimate.
+
+        Called by the master on events that invalidate the prior
+        uncertainty (Totem halt + resume, or a contract roll where the
+        tau discontinuity makes P stale). Default is to keep `y` because
+        convenience yield is a market state, not a per-contract state --
+        the mean estimate is still a reasonable starting point post-roll.
+        """
+        if not keep_y:
+            self.y = float(self.theta)
+        self.P = self._initial_uncertainty
 
     # ------------------------------------------------------------------
     def _process_noise(self, dt: float) -> float:
@@ -105,16 +130,31 @@ class ConvenienceYieldEKF:
         self.P = decay * self.P * decay + self._process_noise(dt)
 
     def _update(self, S_t: float, F_market: float, tau: float, r: float) -> None:
+        # Pre-validate inputs before any arithmetic. A degenerate input
+        # (expired contract, NaN from feed corruption, pathological tau)
+        # would otherwise poison F_theo and self.y silently.
+        if not (math.isfinite(S_t) and math.isfinite(F_market)
+                and math.isfinite(tau) and math.isfinite(r)):
+            logger.warning("EKF update skipped: non-finite input "
+                           "(S_t=%s, F=%s, tau=%s, r=%s)", S_t, F_market, tau, r)
+            return
+        if tau <= 0 or S_t <= 0:
+            return  # observation model is undefined at/past expiry
+
         # Theoretical observation
         F_theo = S_t * math.exp((r - self.y) * tau)
 
         # Jacobian H = d(F_theo)/d(y) = -tau * F_theo
         H = -tau * F_theo
 
+        if not (math.isfinite(F_theo) and math.isfinite(H)):
+            logger.warning("EKF update skipped: F_theo or H overflowed")
+            return
+
         innovation = F_market - F_theo
         S_cov = H * self.P * H + self.R
 
-        # Guard against numerical pathology (S_cov should always be > 0)
+        # Belt-and-suspenders guard on the innovation covariance.
         if S_cov <= 0 or not np.isfinite(S_cov):
             return
 
