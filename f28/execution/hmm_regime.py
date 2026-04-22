@@ -79,7 +79,13 @@ class MicrostructureHMM:
         self._finalize_load()
 
     def load_from_params(self, params: dict) -> None:
-        """Hydrate from the JSON produced by train_f28_models.py."""
+        """Hydrate from the JSON produced by train_f28_models.py.
+
+        If the JSON carries an explicit `state_map`, we trust it verbatim
+        (authoritative, guaranteed to match the C++ port). Otherwise we
+        fall back to re-deriving it from covariance traces, which is
+        vulnerable to floating-point tie-breaking across languages.
+        """
         self.transmat_ = np.asarray(params["transition_matrix"], dtype=float)
         self.means_ = np.asarray(params["means"], dtype=float)
         self.covars_ = np.asarray(params["covars"], dtype=float)
@@ -88,13 +94,32 @@ class MicrostructureHMM:
         k = self.means_.shape[0]
         if k != self.n_states:
             self.n_states = k
-        self._finalize_load()
+
+        serialized_map = params.get("state_map")
+        if serialized_map is not None:
+            self.state_map = {int(k): int(v) for k, v in serialized_map.items()}
+            self._precompute_emission_cache()
+            self._log_probs = np.log(np.clip(self.startprob_, 1e-300, None))
+            self.is_trained = True
+        else:
+            warnings.warn(
+                "HMM params JSON has no 'state_map' key; re-deriving from "
+                "covariance traces. Retrain with the updated trainer to "
+                "make the mapping authoritative.",
+                RuntimeWarning,
+            )
+            self._finalize_load()
 
     def _finalize_load(self) -> None:
         self._map_hidden_states()
         self._precompute_emission_cache()
         self._log_probs = np.log(np.clip(self.startprob_, 1e-300, None))
         self.is_trained = True
+
+    def export_state_map(self) -> dict[int, int]:
+        """Expose the resolved internal -> logical state mapping so
+        train_f28_models.py can serialize it alongside the matrices."""
+        return dict(self.state_map)
 
     def _map_hidden_states(self) -> None:
         """Order states by total covariance trace: smallest trace = Quiet,
